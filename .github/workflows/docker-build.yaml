@@ -38,10 +38,6 @@ jobs:
     needs: pre-check
     if: needs.pre-check.outputs.should_build == 'true'
     runs-on: ${{ matrix.runner }}
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      is_beta: ${{ steps.version.outputs.is_beta }}
-      image: ${{ steps.repo.outputs.image }}
 
     strategy:
       fail-fast: false
@@ -61,8 +57,6 @@ jobs:
       - name: Resolve Docker Hub repo
         id: repo
         env:
-          # Avoid referencing secrets here so the value can be safely passed via
-          # job outputs (GitHub Actions redacts any output containing a secret).
           DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
@@ -110,6 +104,25 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve image and version
+        id: meta
+        env:
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          NAMESPACE="${DOCKERHUB_NAMESPACE:-$(echo "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')}"
+          echo "image=${NAMESPACE}/kiro-rs" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW_VERSION="${{ github.event.inputs.version }}"
+            echo "version=${RAW_VERSION#v}" >> "$GITHUB_OUTPUT"
+            echo "is_beta=false" >> "$GITHUB_OUTPUT"
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-6)
+            echo "version=beta-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "is_beta=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -118,27 +131,26 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Create and push multi-arch manifest
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          IS_BETA: ${{ steps.meta.outputs.is_beta }}
         run: |
           set -euo pipefail
-          VERSION="${{ needs.build.outputs.version }}"
-          IS_BETA="${{ needs.build.outputs.is_beta }}"
-          IMAGE="${{ needs.build.outputs.image }}"
 
-          docker manifest create ${IMAGE}:${VERSION} \
-            ${IMAGE}:${VERSION}-amd64 \
-            ${IMAGE}:${VERSION}-arm64
-          docker manifest push ${IMAGE}:${VERSION}
+          docker manifest create "${IMAGE}:${VERSION}" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+          docker manifest push "${IMAGE}:${VERSION}"
 
           if [ "${IS_BETA}" != "true" ]; then
-            docker manifest create ${IMAGE}:latest \
-              ${IMAGE}:${VERSION}-amd64 \
-              ${IMAGE}:${VERSION}-arm64
-            docker manifest push ${IMAGE}:latest
-          fi
-
-          if [ "${IS_BETA}" = "true" ]; then
-            docker manifest create ${IMAGE}:beta \
-              ${IMAGE}:${VERSION}-amd64 \
-              ${IMAGE}:${VERSION}-arm64
-            docker manifest push ${IMAGE}:beta
+            docker manifest create "${IMAGE}:latest" \
+              "${IMAGE}:${VERSION}-amd64" \
+              "${IMAGE}:${VERSION}-arm64"
+            docker manifest push "${IMAGE}:latest"
+          else
+            docker manifest create "${IMAGE}:beta" \
+              "${IMAGE}:${VERSION}-amd64" \
+              "${IMAGE}:${VERSION}-arm64"
+            docker manifest push "${IMAGE}:beta"
           fi
