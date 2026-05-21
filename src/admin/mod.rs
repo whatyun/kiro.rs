@@ -19,6 +19,7 @@
 mod error;
 mod handlers;
 mod middleware;
+pub mod proxy_pool;
 mod router;
 mod service;
 pub mod types;

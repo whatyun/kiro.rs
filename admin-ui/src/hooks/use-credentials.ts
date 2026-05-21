@@ -8,12 +8,14 @@ import {
   getCredentialBalance,
   addCredential,
   deleteCredential,
+  updateCredential,
+  updateRefreshToken,
   getLoadBalancingMode,
   setLoadBalancingMode,
   resetSuccessCount,
   resetAllSuccessCount,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, UpdateCredentialRequest, UpdateRefreshTokenRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -118,6 +120,30 @@ export function useResetAllSuccessCount() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: () => resetAllSuccessCount(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 更新已禁用凭据的 refreshToken
+export function useUpdateRefreshToken() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, req }: { id: number; req: UpdateRefreshTokenRequest }) =>
+      updateRefreshToken(id, req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 更新凭据可编辑字段
+export function useUpdateCredential() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, req }: { id: number; req: UpdateCredentialRequest }) =>
+      updateCredential(id, req),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

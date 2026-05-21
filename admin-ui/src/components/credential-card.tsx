@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { toast } from 'sonner'
-import { RefreshCw, ChevronUp, ChevronDown, Wallet, Trash2, Loader2 } from 'lucide-react'
+import { RefreshCw, ChevronUp, ChevronDown, Wallet, Trash2, Loader2, Pencil, LogIn } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -16,6 +16,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import type { CredentialStatusItem, BalanceResponse } from '@/types/api'
+import { maskProxyUrl, extractErrorMessage } from '@/lib/utils'
 import {
   useSetDisabled,
   useSetPriority,
@@ -24,6 +25,9 @@ import {
   useForceRefreshToken,
   useResetSuccessCount,
 } from '@/hooks/use-credentials'
+import { EditCredentialDialog } from '@/components/edit-credential-dialog'
+import { UpdateTokenDialog } from '@/components/update-token-dialog'
+import { ReloginDialog } from '@/components/relogin-dialog'
 
 interface CredentialCardProps {
   credential: CredentialStatusItem
@@ -33,6 +37,7 @@ interface CredentialCardProps {
   balance: BalanceResponse | null
   loadingBalance: boolean
 }
+
 
 function formatLastUsed(lastUsedAt: string | null): string {
   if (!lastUsedAt) return '从未使用'
@@ -61,6 +66,9 @@ export function CredentialCard({
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showEditDialog, setShowEditDialog] = useState(false)
+  const [showUpdateTokenDialog, setShowUpdateTokenDialog] = useState(false)
+  const [showReloginDialog, setShowReloginDialog] = useState(false)
 
   const setDisabled = useSetDisabled()
   const setPriority = useSetPriority()
@@ -120,7 +128,7 @@ export function CredentialCard({
         toast.success(res.message)
       },
       onError: (err) => {
-        toast.error('刷新失败: ' + (err as Error).message)
+        toast.error('刷新失败: ' + extractErrorMessage(err))
       },
     })
   }
@@ -158,14 +166,17 @@ export function CredentialCard({
     <>
       <Card className={credential.isCurrent ? 'ring-2 ring-primary' : ''}>
         <CardHeader className="pb-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Checkbox
-                checked={selected}
-                onCheckedChange={onToggleSelect}
-              />
-              <CardTitle className="text-lg flex items-center gap-2">
-                {credential.email || `凭据 #${credential.id}`}
+          <div className="flex items-start gap-2">
+            <Checkbox
+              className="mt-1 flex-shrink-0"
+              checked={selected}
+              onCheckedChange={onToggleSelect}
+            />
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <CardTitle className="text-lg leading-tight">
+                  {credential.email || `凭据 #${credential.id}`}
+                </CardTitle>
                 {credential.isCurrent && (
                   <Badge variant="success">当前</Badge>
                 )}
@@ -186,9 +197,9 @@ export function CredentialCard({
                 {credential.endpoint && (
                   <Badge variant="outline">{credential.endpoint}</Badge>
                 )}
-              </CardTitle>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-shrink-0">
               <span className="text-sm text-muted-foreground">启用</span>
               <Switch
                 checked={!credential.disabled}
@@ -304,7 +315,7 @@ export function CredentialCard({
             {credential.hasProxy && (
               <div className="col-span-2">
                 <span className="text-muted-foreground">代理：</span>
-                <span className="font-medium">{credential.proxyUrl}</span>
+                <span className="font-medium font-mono text-xs">{maskProxyUrl(credential.proxyUrl ?? '')}</span>
               </div>
             )}
             {credential.hasProfileArn && (
@@ -325,6 +336,17 @@ export function CredentialCard({
               <RefreshCw className="h-4 w-4 mr-1" />
               重置失败
             </Button>
+            {credential.authMethod !== 'api_key' && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowReloginDialog(true)}
+                title="选择登录方式重新获取 Token 并刷新该凭据"
+              >
+                <LogIn className="h-4 w-4 mr-1" />
+                重新登录
+              </Button>
+            )}
             <Button
               size="sm"
               variant="outline"
@@ -370,6 +392,25 @@ export function CredentialCard({
             >
               <ChevronDown className="h-4 w-4 mr-1" />
               降低优先级
+            </Button>
+            {credential.authMethod !== 'api_key' && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowUpdateTokenDialog(true)}
+                title="手动粘贴新 Token 并更新凭据"
+              >
+                <RefreshCw className="h-4 w-4 mr-1" />
+                重新导入
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowEditDialog(true)}
+            >
+              <Pencil className="h-4 w-4 mr-1" />
+              编辑
             </Button>
             <Button
               size="sm"
@@ -420,6 +461,27 @@ export function CredentialCard({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 编辑凭据对话框 */}
+      <EditCredentialDialog
+        open={showEditDialog}
+        onOpenChange={setShowEditDialog}
+        credential={credential}
+      />
+
+      {/* 更新 refreshToken 对话框 */}
+      <UpdateTokenDialog
+        open={showUpdateTokenDialog}
+        onOpenChange={setShowUpdateTokenDialog}
+        credential={credential}
+      />
+
+      {/* 重新登录对话框 */}
+      <ReloginDialog
+        open={showReloginDialog}
+        onOpenChange={setShowReloginDialog}
+        credential={credential}
+      />
     </>
   )
 }
