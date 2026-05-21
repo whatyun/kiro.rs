@@ -161,10 +161,63 @@ curl http://127.0.0.1:8990/v1/messages \
 也可以通过 Docker 启动：
 
 ```bash
-docker-compose up
+mkdir -p /opt/kiro-rs/data
+cd /opt/kiro-rs
 ```
 
-需要将 `config.json` 和 `credentials.json` 挂载到容器中，具体参见 `docker-compose.yml`。
+宿主机使用 `data/` 目录保存运行配置和凭据，容器内仍挂载为 `/app/config`。这样可以避免宿主机目录名 `config/` 和文件名 `config.json` 重复造成混淆：
+
+```text
+/opt/kiro-rs/
+├── docker-compose.yml
+└── data/
+    ├── config.json
+    └── credentials.json
+```
+
+`data/config.json` 的容器部署示例：
+
+```json
+{
+   "host": "0.0.0.0",
+   "port": 8990,
+   "apiKey": "sk-kiro-rs-qazWSXedcRFV123456",
+   "adminApiKey": "sk-admin-your-secret-key",
+   "region": "us-east-1",
+   "tlsBackend": "rustls",
+   "defaultEndpoint": "ide",
+   "githubToken": "",
+   "updateImage": "ghcr.io/zyphrzero/kiro-rs:latest",
+   "updateComposeFile": "/app/config/docker-compose.yml",
+   "updateService": "kiro-rs",
+   "redisUrl": "redis://redis:6379",
+   "cacheDebugLogging": false,
+   "cacheMaxReadRatio": [0.8, 0.95]
+}
+```
+
+先创建空凭据文件，之后可在 Admin UI 中添加凭据：
+
+```bash
+echo '[]' > data/credentials.json
+```
+
+`docker-compose.yml` 中的挂载关系：
+
+```yaml
+volumes:
+  - ./data/:/app/config/
+  - ./docker-compose.yml:/app/config/docker-compose.yml:ro
+  - /var/run/docker.sock:/var/run/docker.sock
+```
+
+启动：
+
+```bash
+docker compose up -d
+```
+
+启动后访问 `http://服务器IP:8990/admin`，使用 `config.json` 中的 `adminApiKey` 登录管理页面。
 
 ## 配置详解
 
@@ -481,7 +534,7 @@ Admin UI 顶部的“镜像在线更新”入口支持：
 
 ```yaml
 volumes:
-  - ./config/:/app/config/
+  - ./data/:/app/config/
   - ./docker-compose.yml:/app/config/docker-compose.yml:ro
   - /var/run/docker.sock:/var/run/docker.sock
 ```
