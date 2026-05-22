@@ -618,3 +618,9 @@ MIT
  - [proxycast](https://github.com/aiclientproxy/proxycast)
 
 本项目部分逻辑参考了以上的项目, 再次由衷的感谢!
+
+## 社区支持
+
+欢迎到 [linux.do](https://linux.do/) 交流、分享和反馈。
+
+
