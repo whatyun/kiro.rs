@@ -187,6 +187,28 @@ export interface SetUpdateConfigRequest {
   autoApplyTime?: string
 }
 
+/** GitHub API 限流状态（含 token 验证结果） */
+export interface GitHubRateLimitInfo {
+  /** 提供的 token 是否有效（无 token 时为 false 但仍能查到匿名限额） */
+  valid: boolean
+  /** 是否带 token 调用（false = 匿名查询） */
+  authenticated: boolean
+  /** 限流上限（匿名 60，认证 5000） */
+  limit: number
+  /** 剩余可用次数 */
+  remaining: number
+  /** 已用次数 */
+  used: number
+  /** 限流窗口重置时间（Unix 秒） */
+  reset: number
+  /** token 对应的用户名（可能为空） */
+  login?: string
+  /** token 授予的 OAuth scopes（可能为空） */
+  scopes?: string
+  /** 失败时的提示信息 */
+  warning?: string
+}
+
 export interface ImageUpdateResponse {
   success: boolean
   message: string

@@ -20,12 +20,12 @@ use super::error::AdminServiceError;
 use super::proxy_pool::{GetUrlResult, ProxyPoolManager};
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, AssignProxyRequest, BalanceResponse,
-    BatchAddProxyRequest, CredentialStatusItem, CredentialsStatusResponse,
-    EnableOverageAllResult, ImageUpdateResponse, LoadBalancingModeResponse, PollIdcLoginResponse,
-    ProxyPoolEntry, ProxyPoolResponse, QuotaExceededResult, SetLoadBalancingModeRequest,
-    SetUpdateConfigRequest, StartIdcLoginRequest, StartIdcLoginResponse, StartSocialLoginRequest,
-    StartSocialLoginResponse, UpdateCheckInfo, UpdateConfigResponse, UpdateCredentialRequest,
-    UpdateRefreshTokenRequest,
+    BatchAddProxyRequest, CheckRateLimitRequest, CredentialStatusItem, CredentialsStatusResponse,
+    EnableOverageAllResult, GitHubRateLimitInfo, ImageUpdateResponse, LoadBalancingModeResponse,
+    PollIdcLoginResponse, ProxyPoolEntry, ProxyPoolResponse, QuotaExceededResult,
+    SetLoadBalancingModeRequest, SetUpdateConfigRequest, StartIdcLoginRequest,
+    StartIdcLoginResponse, StartSocialLoginRequest, StartSocialLoginResponse, UpdateCheckInfo,
+    UpdateConfigResponse, UpdateCredentialRequest, UpdateRefreshTokenRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -1190,6 +1190,197 @@ impl AdminService {
             cached: false,
             warning: None,
         })
+    }
+
+    /// 查询 GitHub API 当前限流配额。
+    ///
+    /// `req.github_token` 不为空时使用该 token 验证（用于"保存前先试一下"），
+    /// 否则使用配置中已保存的 `config.github_token`，再缺则匿名查询。
+    /// `/rate_limit` 端点本身不消耗任何配额。
+    pub async fn check_rate_limit(
+        &self,
+        req: CheckRateLimitRequest,
+    ) -> GitHubRateLimitInfo {
+        // 优先用入参 token；空字符串视作"尝试匿名"；缺省回退到已保存 token
+        let token = req
+            .github_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                self.update_config
+                    .lock()
+                    .github_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            });
+        let authenticated = token.is_some();
+
+        let proxy = self.token_manager.proxy().map(|p| p.url.clone());
+        let client = match super::binary_update::build_http_client(proxy.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                return GitHubRateLimitInfo {
+                    valid: false,
+                    authenticated,
+                    limit: 0,
+                    remaining: 0,
+                    used: 0,
+                    reset: 0,
+                    login: None,
+                    scopes: None,
+                    warning: Some(format!("构造 HTTP 客户端失败: {}", e)),
+                };
+            }
+        };
+
+        let mut req_builder = client
+            .get("https://api.github.com/rate_limit")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "kiro-rs-update-checker")
+            .timeout(std::time::Duration::from_secs(10));
+        if let Some(t) = token.as_deref() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", t));
+        }
+
+        let resp = match req_builder.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return GitHubRateLimitInfo {
+                    valid: false,
+                    authenticated,
+                    limit: 0,
+                    remaining: 0,
+                    used: 0,
+                    reset: 0,
+                    login: None,
+                    scopes: None,
+                    warning: Some(format!("请求 GitHub API 失败: {}", e)),
+                };
+            }
+        };
+
+        let status = resp.status();
+        // X-OAuth-Scopes 在 token 有效且授权了 OAuth scope 时返回；个人 fine-grained
+        // token 不会有这个 header，留空即可
+        let scopes = resp
+            .headers()
+            .get("X-OAuth-Scopes")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return GitHubRateLimitInfo {
+                valid: false,
+                authenticated,
+                limit: 0,
+                remaining: 0,
+                used: 0,
+                reset: 0,
+                login: None,
+                scopes: None,
+                warning: Some("GitHub Token 无效或已过期".to_string()),
+            };
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return GitHubRateLimitInfo {
+                valid: false,
+                authenticated,
+                limit: 0,
+                remaining: 0,
+                used: 0,
+                reset: 0,
+                login: None,
+                scopes: None,
+                warning: Some(format!(
+                    "GitHub API 返回 {}: {}",
+                    status,
+                    body.chars().take(200).collect::<String>()
+                )),
+            };
+        }
+
+        let payload: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                return GitHubRateLimitInfo {
+                    valid: false,
+                    authenticated,
+                    limit: 0,
+                    remaining: 0,
+                    used: 0,
+                    reset: 0,
+                    login: None,
+                    scopes,
+                    warning: Some(format!("解析 GitHub 响应失败: {}", e)),
+                };
+            }
+        };
+
+        // /rate_limit 返回结构：{ resources: { core: { limit, remaining, used, reset } }, rate: {...} }
+        // 其中 `core` 是 REST API 整体配额，最贴合在线更新的实际消耗
+        let core = payload
+            .get("resources")
+            .and_then(|r| r.get("core"))
+            .or_else(|| payload.get("rate"));
+        let limit = core.and_then(|c| c.get("limit")).and_then(|v| v.as_u64()).unwrap_or(0);
+        let remaining = core
+            .and_then(|c| c.get("remaining"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let used = core.and_then(|c| c.get("used")).and_then(|v| v.as_u64()).unwrap_or(0);
+        let reset = core.and_then(|c| c.get("reset")).and_then(|v| v.as_u64()).unwrap_or(0);
+
+        // 同时尝试拿 token 对应的用户名；失败不影响主结果
+        let login = if authenticated {
+            self.fetch_github_login(&client, token.as_deref()).await
+        } else {
+            None
+        };
+
+        GitHubRateLimitInfo {
+            valid: true,
+            authenticated,
+            limit,
+            remaining,
+            used,
+            reset,
+            login,
+            scopes,
+            warning: None,
+        }
+    }
+
+    async fn fetch_github_login(
+        &self,
+        client: &reqwest::Client,
+        token: Option<&str>,
+    ) -> Option<String> {
+        let mut req = client
+            .get("https://api.github.com/user")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "kiro-rs-update-checker")
+            .timeout(std::time::Duration::from_secs(10));
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {}", t));
+        }
+        let resp = req.send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let payload: serde_json::Value = resp.json().await.ok()?;
+        payload
+            .get("login")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     }
 
     /// 获取负载均衡模式

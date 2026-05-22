@@ -468,6 +468,17 @@ pub async fn check_update(
     Json(info).into_response()
 }
 
+/// POST /api/admin/system/update/rate-limit
+/// 查询 GitHub API 当前限流配额（可附带 token 用于"保存前先验证"）
+pub async fn check_rate_limit(
+    State(state): State<AdminState>,
+    payload: Option<Json<super::types::CheckRateLimitRequest>>,
+) -> impl IntoResponse {
+    let req = payload.map(|Json(p)| p).unwrap_or_default();
+    let info = state.service.check_rate_limit(req).await;
+    Json(info).into_response()
+}
+
 /// POST /api/admin/credentials/:id/relogin/social/start
 /// 发起 Social 重新登录（更新已有凭据的 Token 而非创建新凭据）
 pub async fn start_social_relogin(

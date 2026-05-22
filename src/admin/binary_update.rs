@@ -158,7 +158,9 @@ pub async fn download_release_binary(
     Ok(())
 }
 
-fn build_http_client(proxy: Option<&str>) -> Result<reqwest::Client, AdminServiceError> {
+pub(super) fn build_http_client(
+    proxy: Option<&str>,
+) -> Result<reqwest::Client, AdminServiceError> {
     let mut builder = reqwest::Client::builder()
         .user_agent("kiro-rs-updater")
         .timeout(std::time::Duration::from_secs(180));

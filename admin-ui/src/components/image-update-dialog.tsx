@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   ChevronDown,
+  CheckCircle2,
   Download,
   ExternalLink,
   Info,
@@ -8,8 +9,10 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  ShieldCheck,
   Sparkles,
   UploadCloud,
+  XCircle,
 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -32,6 +35,7 @@ import {
 } from '@/components/ui/tooltip'
 import {
   applyImageUpdate,
+  checkGitHubRateLimit,
   checkSystemUpdate,
   getUpdateConfig,
   pullUpdateImage,
@@ -39,6 +43,7 @@ import {
   setUpdateConfig,
 } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
+import type { GitHubRateLimitInfo } from '@/types/api'
 
 interface ImageUpdateDialogProps {
   open: boolean
@@ -72,6 +77,15 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
     queryFn: () => checkSystemUpdate(false),
     enabled: open,
     staleTime: 5 * 60 * 1000,
+  })
+
+  // 限流状态：弹窗打开时自动跑一次（用已保存 token），随 update-config 变化复刷
+  const { data: rateLimit, isFetching: checkingRate } = useQuery({
+    queryKey: ['github-rate-limit', data?.githubTokenSet],
+    queryFn: () => checkGitHubRateLimit(),
+    enabled: open && data !== undefined,
+    staleTime: 60 * 1000,
+    retry: 0,
   })
 
   const refreshUpdateCheck = useMutation({
@@ -133,10 +147,28 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
       queryClient.setQueryData(['update-config'], res)
       // 保存成功后立刻强制重新检查，让用户看到新 token 是否能解锁限流
       queryClient.invalidateQueries({ queryKey: ['system-update-check'] })
+      queryClient.invalidateQueries({ queryKey: ['github-rate-limit'] })
       setGithubToken('')
       toast.success(res.githubTokenSet ? 'GitHub Token 已保存' : 'GitHub Token 已清除')
     },
     onError: (err) => toast.error(`保存失败: ${extractErrorMessage(err)}`),
+  })
+
+  // "验证"按钮：用输入框的 token 调一次 /rate_limit，不保存到 config
+  const verifyTokenMutation = useMutation({
+    mutationFn: (token: string) => checkGitHubRateLimit(token),
+    onSuccess: (info) => {
+      if (info.valid) {
+        toast.success(
+          info.login
+            ? `Token 有效，账号 ${info.login}，剩余 ${info.remaining}/${info.limit}`
+            : `Token 有效，剩余 ${info.remaining}/${info.limit}`,
+        )
+      } else {
+        toast.error(info.warning || 'Token 验证失败')
+      }
+    },
+    onError: (err) => toast.error(`验证失败: ${extractErrorMessage(err)}`),
   })
 
   const pullMutation = useMutation({
@@ -175,7 +207,8 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
     rollbackMutation.isPending ||
     autoApplyMutation.isPending ||
     autoApplyTimeMutation.isPending ||
-    githubTokenMutation.isPending
+    githubTokenMutation.isPending ||
+    verifyTokenMutation.isPending
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -403,6 +436,21 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
                     variant="outline"
                     size="sm"
                     disabled={busy || !githubToken.trim()}
+                    onClick={() => verifyTokenMutation.mutate(githubToken.trim())}
+                    title="不保存，先用此 token 调用 /rate_limit 测试"
+                  >
+                    {verifyTokenMutation.isPending ? (
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                    )}
+                    <span className="ml-1.5">验证</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busy || !githubToken.trim()}
                     onClick={() => githubTokenMutation.mutate(githubToken.trim())}
                   >
                     {githubTokenMutation.isPending ? (
@@ -425,6 +473,13 @@ export function ImageUpdateDialog({ open, onOpenChange }: ImageUpdateDialogProps
                     </Button>
                   )}
                 </div>
+                <RateLimitSummary
+                  info={rateLimit}
+                  loading={checkingRate}
+                  onRefresh={() =>
+                    queryClient.invalidateQueries({ queryKey: ['github-rate-limit'] })
+                  }
+                />
               </div>
             </div>
           </div>
@@ -551,6 +606,102 @@ function ReleaseNotesPanel({ version, title, notes, href }: ReleaseNotesPanelPro
             </div>
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+interface RateLimitSummaryProps {
+  info: GitHubRateLimitInfo | undefined
+  loading: boolean
+  onRefresh: () => void
+}
+
+/**
+ * GitHub API 限流摘要卡片：
+ * - 是否带 token（认证 vs 匿名）
+ * - 已用 / 上限 / 剩余 + 进度条
+ * - 限流窗口重置时间（本地时区）
+ * - 失败时把 warning 直接展示出来
+ *
+ * `/rate_limit` 端点本身不消耗配额，可以放心点「刷新」按钮重查。
+ */
+function RateLimitSummary({ info, loading, onRefresh }: RateLimitSummaryProps) {
+  if (loading && !info) {
+    return (
+      <div className="flex items-center gap-1.5 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+        正在查询 GitHub API 限流…
+      </div>
+    )
+  }
+  if (!info) return null
+
+  const used = info.used ?? 0
+  const limit = info.limit ?? 0
+  const remaining = info.remaining ?? 0
+  const ratio = limit > 0 ? Math.min(used / limit, 1) : 0
+  const danger = info.valid && limit > 0 && remaining <= Math.max(5, Math.floor(limit / 20))
+  const resetText = info.reset ? new Date(info.reset * 1000).toLocaleString() : '—'
+
+  return (
+    <div
+      className={`rounded-md border px-3 py-2 text-xs ${
+        info.valid
+          ? danger
+            ? 'border-amber-500/40 bg-amber-50 dark:bg-amber-950/30'
+            : 'bg-muted/30'
+          : 'border-destructive/40 bg-destructive/5'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 font-medium text-foreground">
+          {info.valid ? (
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+          ) : (
+            <XCircle className="h-3.5 w-3.5 text-destructive" />
+          )}
+          API 限流
+          <Badge variant={info.authenticated ? 'success' : 'secondary'} className="ml-1">
+            {info.authenticated ? '已认证' : '匿名'}
+          </Badge>
+          {info.login && (
+            <span className="ml-1 text-muted-foreground">@{info.login}</span>
+          )}
+        </div>
+        <Button type="button" size="sm" variant="ghost" className="h-6 px-2" onClick={onRefresh}>
+          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+        </Button>
+      </div>
+
+      {info.valid ? (
+        <>
+          <div className="mt-1.5 flex items-baseline gap-2 font-mono">
+            <span className={danger ? 'text-amber-700 dark:text-amber-400' : ''}>
+              已用 {used} / {limit}
+            </span>
+            <span className="text-muted-foreground">·</span>
+            <span>剩余 {remaining}</span>
+          </div>
+          <div className="mt-1 h-1.5 rounded-full bg-muted">
+            <div
+              className={`h-full rounded-full transition-all ${
+                danger ? 'bg-amber-500' : 'bg-emerald-500'
+              }`}
+              style={{ width: `${ratio * 100}%` }}
+            />
+          </div>
+          <div className="mt-1.5 text-muted-foreground">
+            重置于：<span className="font-mono">{resetText}</span>
+          </div>
+          {info.scopes && (
+            <div className="mt-0.5 text-muted-foreground">
+              Scopes：<span className="font-mono">{info.scopes}</span>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="mt-1.5 text-destructive">{info.warning || 'Token 验证失败'}</div>
       )}
     </div>
   )

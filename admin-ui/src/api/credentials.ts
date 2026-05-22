@@ -29,6 +29,7 @@ import type {
   SetUpdateConfigRequest,
   ImageUpdateResponse,
   UpdateCheckInfo,
+  GitHubRateLimitInfo,
   UpdateAdminKeyRequest,
 } from '@/types/api'
 
@@ -288,6 +289,18 @@ export async function checkSystemUpdate(force = false): Promise<UpdateCheckInfo>
   const { data } = await api.get<UpdateCheckInfo>('/system/update/check', {
     params: force ? { force: 'true' } : undefined,
   })
+  return data
+}
+
+// 查询 GitHub API 当前限流状态（可附带 token 用于"保存前先验证"）
+export async function checkGitHubRateLimit(
+  githubToken?: string,
+): Promise<GitHubRateLimitInfo> {
+  const body = githubToken ? { githubToken } : {}
+  const { data } = await api.post<GitHubRateLimitInfo>(
+    '/system/update/rate-limit',
+    body,
+  )
   return data
 }
 

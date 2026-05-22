@@ -407,6 +407,45 @@ pub struct ImageUpdateResponse {
     pub need_restart: bool,
 }
 
+/// GitHub API 限流状态（含 token 验证结果）
+///
+/// 调用 `GET https://api.github.com/rate_limit`：该端点本身不消耗限流配额，
+/// 用来给前端展示「当前 token 是否有效 / 剩余次数 / 重置时间」。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubRateLimitInfo {
+    /// 提供的 token 是否有效（无 token 时为 false 但仍能查到匿名限额）
+    pub valid: bool,
+    /// 是否带 token 调用（false = 匿名查询）
+    pub authenticated: bool,
+    /// 限流上限（匿名 60，认证 5000）
+    pub limit: u64,
+    /// 剩余可用次数
+    pub remaining: u64,
+    /// 已用次数
+    pub used: u64,
+    /// 限流窗口重置时间（Unix 秒）
+    pub reset: u64,
+    /// token 对应的用户名（仅 token 有效且属于个人时返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    /// token 授予的权限范围（X-OAuth-Scopes header）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    /// 失败时的提示信息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// 测试 GitHub Token 有效性的请求体；空字段或缺失视为"使用已保存的 token"
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckRateLimitRequest {
+    /// 待测试的 token；缺省或空时使用 `config.github_token`，再缺省则匿名查询
+    #[serde(default)]
+    pub github_token: Option<String>,
+}
+
 /// "检查更新"接口返回结果
 ///
 /// 当 has_update=true 时，前端可在工具栏图标上显示红点提醒。
