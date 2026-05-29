@@ -807,9 +807,13 @@ async fn handle_non_stream_request(
             super::stream::extract_thinking_from_complete_text(&text_content);
 
         if let Some(thinking_text) = thinking {
+            // signature 占位字符串：上游 Kiro 不下发真实 Anthropic 签名，
+            // 但 thinking 模式下客户端要求 thinking 块带 signature 字段，
+            // 否则下一轮回传时 SDK 本地校验会拒绝（"must be passed back"）
             content.push(json!({
                 "type": "thinking",
-                "thinking": thinking_text
+                "thinking": thinking_text,
+                "signature": super::stream::THINKING_SIGNATURE_PLACEHOLDER,
             }));
         }
 
